@@ -40,5 +40,7 @@ build_sdimg/
 .Xil
 
 # Dont't ignore import/ itself
-!import/
 import/*
+!import/
+!import/.gitkeep
+
