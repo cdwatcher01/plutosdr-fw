@@ -36,4 +36,8 @@
 *.su
 
 build/
+build_sdimg/
 .Xil
+
+# Dont't ignore import/
+!import/

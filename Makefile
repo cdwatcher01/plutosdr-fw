@@ -11,10 +11,12 @@ VIVADO_SETTINGS ?= /opt/Xilinx/Vivado/$(VIVADO_VERSION)/settings64.sh
 VSUBDIRS = hdl buildroot linux u-boot-xlnx
 
 VERSION=$(shell git describe --abbrev=4 --dirty --always --tags)
+# VERSION=$(shell git describe --abbrev=4 --always --tags)
 LATEST_TAG=$(shell git describe --abbrev=0 --tags)
 UBOOT_VERSION=$(shell echo -n "PlutoSDR " && cd u-boot-xlnx && git describe --abbrev=0 --dirty --always --tags)
 HAVE_VIVADO= $(shell bash -c "source $(VIVADO_SETTINGS) > /dev/null 2>&1 && vivado -version > /dev/null 2>&1 && echo 1 || echo 0")
 XSA_URL ?= http://github.com/analogdevicesinc/plutosdr-fw/releases/download/${LATEST_TAG}/system_top.xsa
+XSA_FILE ?= $(CURDIR)/import/system_top.xsa
 
 ifeq (1, ${HAVE_VIVADO})
 	VIVADO_INSTALL= $(shell bash -c "source $(VIVADO_SETTINGS) > /dev/null 2>&1 && vivado -version | head -1 | awk '{print $2}'")
@@ -28,23 +30,25 @@ $(error "      3] export VIVADO_VERSION=v20xx.x")
 endif
 
 TARGET ?= pluto
+TARGET_BOARD := $(TARGET)-sdr
+EXPORT_DEPENDENCIES = build/sdk/fsbl/Release/fsbl.elf build/system_top.bit build/u-boot.elf build/uImage build/zynq-$(TARGET_BOARD).dtb build/uboot-env.txt build/rootfs.cpio.gz
 SUPPORTED_TARGETS:=pluto sidekiqz2
 
 # Include target specific constants
 include scripts/$(TARGET).mk
 
-ifeq (, $(shell which dfu-suffix))
-$(warning "No dfu-utils in PATH consider doing: sudo apt-get install dfu-util")
-TARGETS = build/$(TARGET).frm
-ifeq (1, ${HAVE_VIVADO})
-TARGETS += build/boot.frm jtag-bootstrap
-endif
-else
-TARGETS = build/$(TARGET).dfu build/uboot-env.dfu build/$(TARGET).frm
-ifeq (1, ${HAVE_VIVADO})
+# ifeq (, $(shell which dfu-suffix))
+# $(warning "No dfu-utils in PATH consider doing: sudo apt-get install dfu-util")
+# TARGETS = build/$(TARGET).frm
+# ifeq (1, ${HAVE_VIVADO})
+# 	TARGETS += build/boot.frm jtag-bootstrap
+# else
+TARGETS = build/$(TARGET).frm build/$(TARGET).dfu build/uboot-env.dfu jtag-bootstrap
 TARGETS += build/boot.dfu build/boot.frm jtag-bootstrap
+ifeq (1, ${HAVE_VIVADO})
+	TARGETS += build/boot.dfu build/boot.frm jtag-bootstrap
 endif
-endif
+#endif
 
 ifeq ($(findstring $(TARGET),$(SUPPORTED_TARGETS)),)
 all:
@@ -91,12 +95,18 @@ build/uboot-env.bin: build/uboot-env.txt
 linux/arch/arm/boot/zImage: TOOLCHAIN
 	$(TOOLS_PATH) make -C linux ARCH=arm CROSS_COMPILE=$(CROSS_COMPILE) zynq_$(TARGET)_defconfig
 	$(TOOLS_PATH) make -C linux -j $(NCORES) ARCH=arm CROSS_COMPILE=$(CROSS_COMPILE) zImage UIMAGE_LOADADDR=0x8000
+linux/arch/arm/boot/uImage: TOOLCHAIN
+	$(TOOLS_PATH) make -C linux ARCH=arm CROSS_COMPILE=$(CROSS_COMPILE) zynq_$(TARGET)_defconfig
+	$(TOOLS_PATH) make -C linux -j $(NCORES) ARCH=arm CROSS_COMPILE=$(CROSS_COMPILE) uImage UIMAGE_LOADADDR=0x8000
 
 
 .PHONY: linux/arch/arm/boot/zImage
+.PHONY: linux/arch/arm/boot/uImage
 
 
 build/zImage: linux/arch/arm/boot/zImage | build
+	cp $< $@
+build/uImage: linux/arch/arm/boot/uImage | build
 	cp $< $@
 
 ### Device Tree ###
@@ -127,7 +137,7 @@ endif
 build/rootfs.cpio.gz: buildroot/output/images/rootfs.cpio.gz | build
 	cp $< $@
 
-build/$(TARGET).itb: u-boot-xlnx/tools/mkimage build/zImage build/rootfs.cpio.gz $(TARGET_DTS_FILES) build/system_top.bit
+build/$(TARGET).itb: u-boot-xlnx/tools/mkimage build/zImage build/uImage build/rootfs.cpio.gz $(TARGET_DTS_FILES) build/system_top.bit
 	u-boot-xlnx/tools/mkimage -f scripts/$(TARGET).its $@
 
 build/system_top.xsa:  | build
@@ -148,11 +158,13 @@ ifeq (1, ${HAVE_VIVADO})
 	bash -c "source $(VIVADO_SETTINGS) && xsct scripts/create_fsbl_project.tcl"
 else
 	unzip -o build/system_top.xsa system_top.bit -d build
+	mkdir -p build/sdk/fsbl/Release/
+	cp $(CURDIR)/import/fsbl.elf build/sdk/fsbl/Release/fsbl.elf
 endif
 
-build/boot.bin: build/sdk/fsbl/Release/fsbl.elf build/u-boot.elf
+build/boot.bin: build/sdk/fsbl/Release/fsbl.elf build/u-boot.elf bootgen/bootgen
 	@echo img:{[bootloader] $^ } > build/boot.bif
-	bash -c "source $(VIVADO_SETTINGS) && bootgen -image build/boot.bif -w -o $@"
+	bash -c "./bootgen/bootgen -image build/boot.bif -w -o $@"
 
 ### MSD update firmware file ###
 
@@ -184,6 +196,7 @@ clean:
 	make -C linux clean
 	make -C buildroot clean
 	make -C hdl clean
+	make -C bootgen clean
 	rm -f $(notdir $(wildcard build/*))
 	rm -rf build/*
 
@@ -225,7 +238,47 @@ ifneq (1, ${SKIP_LEGAL})
 	tar czvf build/legal-info-$(VERSION).tar.gz -C buildroot/output legal-info
 endif
 
+build/ps7_init.tcl:
+	cp $(CURDIR)/import/ps7_init.tcl $@
 
+# export_build: 
+# ifneq ($(filter-out $(wildcard $(EXPORT_DEPENDENCIES)), $(EXPORT_DEPENDENCIES)),)
+# 	echo "Error: Missing dependencies: $(MISSING)" && exit 1 
+# endif
+# 	@test -d export || mkdir -p export
+# 	@test -e export/build-$(VERSION).zip && rm export/build-$(VERSION).zip
+# 	zip export/build-$(VERSION).zip $(EXPORT_DEPENDENCIES)
+ 
+## sd card ##
+SDIMGDIR = $(CURDIR)/build_sdimg
+## sd card ##
+sdimg: build/ bootgen/bootgen
+	rm -rf $(SDIMGDIR)
+	mkdir $(SDIMGDIR)
+	cp build/sdk/fsbl/Release/fsbl.elf 	$(SDIMGDIR)/fsbl.elf  
+	cp build/system_top.bit 	$(SDIMGDIR)/system_top.bit
+	cp build/u-boot.elf 			$(SDIMGDIR)/u-boot.elf
+	cp build/uImage	$(SDIMGDIR)/uImage
+	cp build/zynq-$(TARGET_BOARD).dtb 	$(SDIMGDIR)/devicetree.dtb
+	cp build/uboot-env.txt  		$(SDIMGDIR)/uEnv.txt
+	cp build/rootfs.cpio.gz  		$(SDIMGDIR)/ramdisk.image.gz
+	mkimage -A arm -T ramdisk -C gzip -d $(SDIMGDIR)/ramdisk.image.gz $(SDIMGDIR)/uramdisk.image.gz
+	touch 	$(SDIMGDIR)/boot.bif
+	echo "img : {[bootloader] $(SDIMGDIR)/fsbl.elf  $(SDIMGDIR)/system_top.bit  $(SDIMGDIR)/u-boot.elf}" >  $(SDIMGDIR)/boot.bif
+	bash -c "./bootgen/bootgen -image $(SDIMGDIR)/boot.bif -arch zynq -o $(SDIMGDIR)/BOOT.bin"
+	mkdir $(SDIMGDIR)/bootbin
+	cp $(SDIMGDIR)/fsbl.elf $(SDIMGDIR)/bootbin
+	cp $(SDIMGDIR)/system_top.bit $(SDIMGDIR)/bootbin
+	cp $(SDIMGDIR)/u-boot.elf $(SDIMGDIR)/bootbin
+	rm $(SDIMGDIR)/fsbl.elf
+	rm $(SDIMGDIR)/system_top.bit
+	rm $(SDIMGDIR)/u-boot.elf
+	rm $(SDIMGDIR)/ramdisk.image.gz 
+	rm $(SDIMGDIR)/boot.bif
+	
+bootgen/bootgen:
+	make -C bootgen
+ 
 git-update-all:
 	git submodule update --recursive --remote
 
