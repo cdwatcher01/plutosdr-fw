@@ -39,5 +39,6 @@ build/
 build_sdimg/
 .Xil
 
-# Dont't ignore import/
+# Dont't ignore import/ itself
 !import/
+import/*
